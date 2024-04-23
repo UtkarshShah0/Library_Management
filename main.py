@@ -1,7 +1,10 @@
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 from model import *
+
+from aioredis import Redis 
+from datetime import datetime
 
 
 
@@ -29,6 +32,46 @@ app.add_middleware(
     allow_headers = ["*"],
 
 )
+
+
+# Redis Connection
+async def get_redis():
+    return await Redis.from_url("redis://localhost")
+
+
+# Rate limiter 
+async def rate_limiter(request: Request, redis: Redis):
+    user_id = request.headers.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="No User ID")
+    
+    today = datetime.now().date().isoformat()
+
+    key = f"rate_limiter:{user_id}:{today}"
+    count = await redis.get(key)
+    if count is None:
+        await redis.setex(key, 86400, 1)
+    else:
+        count = int(count)
+        if count >= 5:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+        await redis.incr(key)
+
+
+# Middleware
+
+@app.middleware("http")
+async def check_rate_limit(request: Request, call_next):
+    redis = await get_redis()
+    try:
+        await rate_limiter(request, redis)
+    except HTTPException as e:
+        return Response(content = e.detail, status_code=e.status_code)
+    else:
+        response = await call_next(request)
+        return response
+
 
 
 # Endpoints
